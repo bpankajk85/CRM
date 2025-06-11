@@ -1,6 +1,6 @@
 import { logger } from '../config/logger.js';
 
-// Global email rate limiting - 2 emails per minute
+// Per-user email rate limiting - 2 emails per minute per user
 const EMAIL_RATE_LIMIT = 2;
 const RATE_WINDOW_MS = 60 * 1000; // 1 minute in milliseconds
 
@@ -17,9 +17,9 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-export function checkEmailRateLimit(organizationId) {
+export function checkEmailRateLimit(userId) {
   const now = Date.now();
-  const key = `org_${organizationId}`;
+  const key = `user_${userId}`;
   
   let rateData = emailRateStore.get(key);
   
@@ -34,7 +34,7 @@ export function checkEmailRateLimit(organizationId) {
   
   if (rateData.count >= EMAIL_RATE_LIMIT) {
     const timeUntilReset = RATE_WINDOW_MS - (now - rateData.windowStart);
-    logger.warn(`Email rate limit exceeded for organization ${organizationId}. Reset in ${Math.ceil(timeUntilReset / 1000)}s`);
+    logger.warn(`Email rate limit exceeded for user ${userId}. Reset in ${Math.ceil(timeUntilReset / 1000)}s`);
     
     return {
       allowed: false,
@@ -50,21 +50,21 @@ export function checkEmailRateLimit(organizationId) {
   };
 }
 
-export function incrementEmailCount(organizationId) {
-  const key = `org_${organizationId}`;
+export function incrementEmailCount(userId) {
+  const key = `user_${userId}`;
   const rateData = emailRateStore.get(key);
   
   if (rateData) {
     rateData.count++;
     emailRateStore.set(key, rateData);
     
-    logger.info(`Email sent for organization ${organizationId}. Count: ${rateData.count}/${EMAIL_RATE_LIMIT}`);
+    logger.info(`Email sent by user ${userId}. Count: ${rateData.count}/${EMAIL_RATE_LIMIT}`);
   }
 }
 
-export function getEmailRateStatus(organizationId) {
+export function getEmailRateStatus(userId) {
   const now = Date.now();
-  const key = `org_${organizationId}`;
+  const key = `user_${userId}`;
   const rateData = emailRateStore.get(key);
   
   if (!rateData || now - rateData.windowStart >= RATE_WINDOW_MS) {
@@ -86,18 +86,18 @@ export function getEmailRateStatus(organizationId) {
 
 // Middleware for API endpoints that send emails
 export function emailRateLimitMiddleware(req, res, next) {
-  const organizationId = req.user?.organizationId;
+  const userId = req.user?.id;
   
-  if (!organizationId) {
-    return res.status(401).json({ error: 'Organization ID required' });
+  if (!userId) {
+    return res.status(401).json({ error: 'User authentication required' });
   }
   
-  const rateCheck = checkEmailRateLimit(organizationId);
+  const rateCheck = checkEmailRateLimit(userId);
   
   if (!rateCheck.allowed) {
     return res.status(429).json({
       error: 'Email rate limit exceeded',
-      message: `Maximum ${EMAIL_RATE_LIMIT} emails per minute allowed`,
+      message: `Maximum ${EMAIL_RATE_LIMIT} emails per minute allowed per user`,
       resetTime: Math.ceil(rateCheck.resetTime / 1000),
       remaining: rateCheck.remaining
     });
