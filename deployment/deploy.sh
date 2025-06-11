@@ -82,6 +82,14 @@ sudo -u $APP_USER npm install --production
 print_status "Building frontend..."
 sudo -u $APP_USER npm run build
 
+# Verify dist folder was created
+if [ ! -d "$APP_DIR/dist" ]; then
+    print_error "Frontend build failed - dist folder not created"
+    exit 1
+fi
+
+print_status "Frontend built successfully"
+
 # Run database migrations
 print_status "Running database migrations..."
 sudo -u $APP_USER npm run db:migrate
