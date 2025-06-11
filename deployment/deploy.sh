@@ -46,6 +46,11 @@ apt update && apt upgrade -y
 print_status "Installing required packages..."
 apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx
 
+# Start and enable MySQL service
+print_status "Starting MySQL service..."
+systemctl start mysql
+systemctl enable mysql
+
 # Install PM2 for process management
 npm install -g pm2
 
