@@ -38,14 +38,24 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Set environment variables for headless operation
+export DEBIAN_FRONTEND=noninteractive
+export DISPLAY=
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export QT_QPA_PLATFORM=offscreen
+export NODE_ENV=production
+
+# Create runtime directory
+mkdir -p /tmp/runtime-root
+chmod 700 /tmp/runtime-root
+
 # Update system
 print_status "Updating system packages..."
-export DEBIAN_FRONTEND=noninteractive
 apt update && apt upgrade -y
 
-# Install required packages
+# Install required packages including virtual display for headless operation
 print_status "Installing required packages..."
-apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl
+apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl xvfb
 
 # Start and enable MySQL service
 print_status "Starting MySQL service..."
@@ -60,6 +70,10 @@ npm install -g pm2
 print_status "Creating application user..."
 if ! id "$APP_USER" &>/dev/null; then
     useradd -r -s /bin/false -d $APP_DIR $APP_USER
+    # Create runtime directory for app user
+    mkdir -p /tmp/runtime-$APP_USER
+    chown $APP_USER:$APP_USER /tmp/runtime-$APP_USER
+    chmod 700 /tmp/runtime-$APP_USER
 fi
 
 # Create application directory
@@ -83,24 +97,63 @@ chown -R $APP_USER:$APP_USER $APP_DIR
 # Install dependencies
 print_status "Installing Node.js dependencies..."
 cd $APP_DIR
-sudo -u $APP_USER npm install --production --no-optional
 
-# Build frontend
+# Set environment variables for the app user build process
+sudo -u $APP_USER bash -c "
+export NODE_ENV=production
+export DISPLAY=
+export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
+export QT_QPA_PLATFORM=offscreen
+npm install --production --no-optional
+"
+
+# Build frontend with virtual display
 print_status "Building frontend..."
-sudo -u $APP_USER npm run build
+sudo -u $APP_USER bash -c "
+export NODE_ENV=production
+export DISPLAY=:99
+export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
+export QT_QPA_PLATFORM=offscreen
+# Start virtual display
+Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+XVFB_PID=\$!
+# Wait a moment for Xvfb to start
+sleep 2
+# Run the build
+npm run build
+# Kill virtual display
+kill \$XVFB_PID 2>/dev/null || true
+"
 
 # Verify dist folder was created
 if [ ! -d "$APP_DIR/dist" ]; then
     print_error "Frontend build failed - dist folder not created"
-    exit 1
+    print_error "Trying alternative build method..."
+    
+    # Alternative build without virtual display
+    sudo -u $APP_USER bash -c "
+    export NODE_ENV=production
+    export DISPLAY=
+    export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
+    export QT_QPA_PLATFORM=minimal
+    npm run build 2>&1 | grep -v 'qt.qpa' || true
+    "
+    
+    if [ ! -d "$APP_DIR/dist" ]; then
+        print_error "Frontend build failed completely"
+        exit 1
+    fi
 fi
 
 print_status "Frontend built successfully"
 
 # Run database migrations
 print_status "Running database migrations..."
-sudo -u $APP_USER npm run db:migrate 2>/dev/null || print_warning "Database migration failed - continuing anyway"
-sudo -u $APP_USER npm run db:seed 2>/dev/null || print_warning "Database seeding failed - continuing anyway"
+sudo -u $APP_USER bash -c "
+export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
+npm run db:migrate 2>/dev/null || echo 'Database migration failed - continuing anyway'
+npm run db:seed 2>/dev/null || echo 'Database seeding failed - continuing anyway'
+"
 
 # Setup systemd service
 print_status "Setting up systemd service..."
@@ -178,6 +231,9 @@ chmod +x /usr/local/bin/backup-email-platform.sh
 # Setup daily backup cron job
 print_status "Setting up daily backups..."
 (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/backup-email-platform.sh") | crontab -
+
+# Clean up temporary runtime directories
+rm -rf /tmp/runtime-root /tmp/runtime-$APP_USER
 
 # Final status check
 print_status "Checking service status..."
