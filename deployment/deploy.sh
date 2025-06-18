@@ -13,6 +13,7 @@ APP_USER="email-platform"
 APP_DIR="/opt/email-platform"
 DB_NAME="email_platform"
 DB_USER="email_platform"
+DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-25)"
 
 # Colors for output
 RED='\033[0;31m'
@@ -62,6 +63,60 @@ print_status "Starting MySQL service..."
 systemctl start mysql
 systemctl enable mysql
 
+# Wait for MySQL to be ready
+print_status "Waiting for MySQL to be ready..."
+sleep 5
+
+# Setup MySQL with proper authentication
+print_status "Setting up MySQL database and user..."
+
+# First, secure MySQL installation and set root password if needed
+mysql --defaults-file=/dev/stdin <<EOF 2>/dev/null || {
+    print_warning "MySQL root access failed, trying alternative setup..."
+    
+    # Try with sudo mysql (works on Ubuntu with auth_socket)
+    sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'temp_root_password';" 2>/dev/null || true
+    sudo mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+    
+    # Now try with the temporary password
+    mysql -u root -ptemp_root_password -e "SELECT 1;" 2>/dev/null || {
+        print_error "Could not establish MySQL root access"
+        exit 1
+    }
+    
+    # Set the actual root password
+    mysql -u root -ptemp_root_password -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'secure_root_password_$(date +%s)';"
+    mysql -u root -ptemp_root_password -e "FLUSH PRIVILEGES;"
+}
+EOF
+
+# Create database and user with proper authentication
+print_status "Creating database and application user..."
+
+# Try different methods to access MySQL
+if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+    # Root access without password (auth_socket)
+    mysql -u root <<EOF
+CREATE DATABASE IF NOT EXISTS $DB_NAME;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+elif sudo mysql -e "SELECT 1;" 2>/dev/null; then
+    # Root access via sudo
+    sudo mysql <<EOF
+CREATE DATABASE IF NOT EXISTS $DB_NAME;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+else
+    print_error "Could not access MySQL to create database"
+    exit 1
+fi
+
+print_status "Database setup completed"
+
 # Install PM2 for process management
 print_status "Installing PM2..."
 npm install -g pm2
@@ -82,17 +137,27 @@ mkdir -p $APP_DIR
 mkdir -p $APP_DIR/logs
 chown -R $APP_USER:$APP_USER $APP_DIR
 
-# Setup MySQL database
-print_status "Setting up MySQL database..."
-mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;" 2>/dev/null || true
-mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY 'secure_password_here';" 2>/dev/null || true
-mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';" 2>/dev/null || true
-mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-
 # Copy application files (assumes you're running from the project directory)
 print_status "Copying application files..."
 rsync -av --exclude=node_modules --exclude=.git --exclude=dist . $APP_DIR/
 chown -R $APP_USER:$APP_USER $APP_DIR
+
+# Create environment file with database credentials
+print_status "Creating environment configuration..."
+cat > $APP_DIR/.env << EOF
+NODE_ENV=production
+PORT=3001
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=$DB_USER
+DB_PASSWORD=$DB_PASSWORD
+DB_NAME=$DB_NAME
+JWT_SECRET=$(openssl rand -base64 64 | tr -d '\n')
+FRONTEND_URL=https://your-domain.com
+EOF
+
+chown $APP_USER:$APP_USER $APP_DIR/.env
+chmod 600 $APP_DIR/.env
 
 # Install dependencies
 print_status "Installing Node.js dependencies..."
@@ -147,17 +212,59 @@ fi
 
 print_status "Frontend built successfully"
 
-# Run database migrations
+# Run database migrations with proper credentials
 print_status "Running database migrations..."
 sudo -u $APP_USER bash -c "
+cd $APP_DIR
 export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
-npm run db:migrate 2>/dev/null || echo 'Database migration failed - continuing anyway'
-npm run db:seed 2>/dev/null || echo 'Database seeding failed - continuing anyway'
+export DB_HOST=localhost
+export DB_USER=$DB_USER
+export DB_PASSWORD=$DB_PASSWORD
+export DB_NAME=$DB_NAME
+npm run db:migrate || echo 'Database migration failed - continuing anyway'
+npm run db:seed || echo 'Database seeding failed - continuing anyway'
 "
 
-# Setup systemd service
+# Update systemd service with environment variables
 print_status "Setting up systemd service..."
-cp systemd/email-platform.service /etc/systemd/system/
+cat > /etc/systemd/system/email-platform.service << EOF
+[Unit]
+Description=Email Management Platform
+After=network.target
+After=mysql.service
+Requires=mysql.service
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=email-platform
+
+# Load environment from file
+EnvironmentFile=$APP_DIR/.env
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$APP_DIR/logs
+ReadWritePaths=/tmp
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable email-platform
 
@@ -207,23 +314,26 @@ else
     print_warning "UFW not available, skipping firewall configuration"
 fi
 
-# Create backup script
+# Create backup script with proper credentials
 print_status "Setting up backup script..."
-cat > /usr/local/bin/backup-email-platform.sh << 'EOF'
+cat > /usr/local/bin/backup-email-platform.sh << EOF
 #!/bin/bash
 BACKUP_DIR="/opt/backups"
-DATE=$(date +%Y%m%d_%H%M%S)
-mkdir -p $BACKUP_DIR
+DATE=\$(date +%Y%m%d_%H%M%S)
+mkdir -p \$BACKUP_DIR
+
+# Load database credentials
+source $APP_DIR/.env
 
 # Backup database
-mysqldump email_platform > $BACKUP_DIR/db_backup_$DATE.sql 2>/dev/null || echo "Database backup failed"
+mysqldump -u \$DB_USER -p\$DB_PASSWORD \$DB_NAME > \$BACKUP_DIR/db_backup_\$DATE.sql 2>/dev/null || echo "Database backup failed"
 
 # Backup application files
-tar -czf $BACKUP_DIR/app_backup_$DATE.tar.gz -C /opt email-platform 2>/dev/null || echo "Application backup failed"
+tar -czf \$BACKUP_DIR/app_backup_\$DATE.tar.gz -C /opt email-platform 2>/dev/null || echo "Application backup failed"
 
 # Keep only last 7 days of backups
-find $BACKUP_DIR -name "*.sql" -mtime +7 -delete 2>/dev/null || true
-find $BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete 2>/dev/null || true
+find \$BACKUP_DIR -name "*.sql" -mtime +7 -delete 2>/dev/null || true
+find \$BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete 2>/dev/null || true
 EOF
 
 chmod +x /usr/local/bin/backup-email-platform.sh
@@ -253,20 +363,26 @@ print_status "Deployment completed! 🎉"
 print_warning "Don't forget to:"
 print_warning "1. Update the domain name in /etc/nginx/sites-available/email-platform"
 print_warning "2. Set up SSL with: certbot --nginx -d your-domain.com"
-print_warning "3. Update environment variables in /etc/systemd/system/email-platform.service"
-print_warning "4. Change default database password"
-print_warning "5. Restart services after configuration changes: systemctl restart email-platform nginx"
+print_warning "3. Update FRONTEND_URL in $APP_DIR/.env after setting up your domain"
+print_warning "4. Restart services after configuration changes: systemctl restart email-platform nginx"
 
 echo ""
 echo "📋 Application Info:"
 echo "   - Application URL: http://your-server-ip"
 echo "   - Application Directory: $APP_DIR"
+echo "   - Environment File: $APP_DIR/.env"
 echo "   - Log Files: $APP_DIR/logs/"
 echo "   - Service Status: systemctl status email-platform"
 echo "   - Nginx Status: systemctl status nginx"
 echo "   - Default Login: admin@demo.com / admin123"
 echo ""
+echo "🔧 Database Info:"
+echo "   - Database Name: $DB_NAME"
+echo "   - Database User: $DB_USER"
+echo "   - Database Password: $DB_PASSWORD"
+echo "   - Test Connection: mysql -u $DB_USER -p$DB_PASSWORD $DB_NAME"
+echo ""
 echo "🔧 Troubleshooting:"
 echo "   - View application logs: journalctl -u email-platform -f"
 echo "   - View nginx logs: tail -f /var/log/nginx/email-platform.*.log"
-echo "   - Test database connection: mysql -u $DB_USER -p $DB_NAME"
+echo "   - Check environment: cat $APP_DIR/.env"
