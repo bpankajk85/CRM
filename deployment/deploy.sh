@@ -43,6 +43,10 @@ fi
 # Set environment variables for headless operation
 export DEBIAN_FRONTEND=noninteractive
 export NODE_ENV=production
+export DISPLAY=""
+export XDG_RUNTIME_DIR=""
+export QT_QPA_PLATFORM=offscreen
+export QT_LOGGING_RULES="*=false"
 
 # Update system
 print_status "Updating system packages..."
@@ -162,23 +166,49 @@ chmod 600 $APP_DIR/.env
 print_status "Installing Node.js dependencies..."
 cd $APP_DIR
 
-# Install dependencies as app user
+# Install dependencies as app user with headless environment
 sudo -u $APP_USER bash -c "
 export NODE_ENV=production
+export DISPLAY=''
+export XDG_RUNTIME_DIR=''
+export QT_QPA_PLATFORM=offscreen
+export QT_LOGGING_RULES='*=false'
 npm install --production --no-optional
 "
 
-# Build frontend
+# Build frontend with headless environment
 print_status "Building frontend..."
 sudo -u $APP_USER bash -c "
 export NODE_ENV=production
-npm run build
+export DISPLAY=''
+export XDG_RUNTIME_DIR=''
+export QT_QPA_PLATFORM=offscreen
+export QT_LOGGING_RULES='*=false'
+export CI=true
+npm run build 2>&1 | grep -v 'qt.qpa' || true
 "
 
 # Verify dist folder was created
 if [ ! -d "$APP_DIR/dist" ]; then
     print_error "Frontend build failed - dist folder not created"
-    exit 1
+    print_error "Attempting alternative build method..."
+    
+    # Try building with even more restrictive environment
+    sudo -u $APP_USER bash -c "
+    export NODE_ENV=production
+    export DISPLAY=''
+    export XDG_RUNTIME_DIR=''
+    export QT_QPA_PLATFORM=minimal
+    export QT_LOGGING_RULES='*=false'
+    export CI=true
+    export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    npm run build --silent 2>/dev/null || npm run build
+    "
+    
+    if [ ! -d "$APP_DIR/dist" ]; then
+        print_error "Frontend build failed completely"
+        exit 1
+    fi
 fi
 
 print_status "Frontend built successfully"
