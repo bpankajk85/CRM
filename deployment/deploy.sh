@@ -14,6 +14,7 @@ APP_DIR="/opt/email-platform"
 DB_NAME="email_platform"
 DB_USER="email_platform"
 DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-25)"
+JWT_SECRET="$(openssl rand -base64 64 | tr -d '\n')"
 
 # Colors for output
 RED='\033[0;31m'
@@ -41,22 +42,15 @@ fi
 
 # Set environment variables for headless operation
 export DEBIAN_FRONTEND=noninteractive
-export DISPLAY=
-export XDG_RUNTIME_DIR=/tmp/runtime-root
-export QT_QPA_PLATFORM=offscreen
 export NODE_ENV=production
-
-# Create runtime directory
-mkdir -p /tmp/runtime-root
-chmod 700 /tmp/runtime-root
 
 # Update system
 print_status "Updating system packages..."
 apt update && apt upgrade -y
 
-# Install required packages including virtual display for headless operation
+# Install required packages
 print_status "Installing required packages..."
-apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl xvfb
+apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl
 
 # Start and enable MySQL service
 print_status "Starting MySQL service..."
@@ -65,55 +59,64 @@ systemctl enable mysql
 
 # Wait for MySQL to be ready
 print_status "Waiting for MySQL to be ready..."
-sleep 5
+sleep 10
 
-# Setup MySQL with proper authentication
-print_status "Setting up MySQL database and user..."
-
-# First, secure MySQL installation and set root password if needed
-mysql --defaults-file=/dev/stdin <<EOF 2>/dev/null || {
-    print_warning "MySQL root access failed, trying alternative setup..."
+# Function to test MySQL connection
+test_mysql_connection() {
+    local user="$1"
+    local password="$2"
+    local auth_method="$3"
     
-    # Try with sudo mysql (works on Ubuntu with auth_socket)
-    sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'temp_root_password';" 2>/dev/null || true
-    sudo mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-    
-    # Now try with the temporary password
-    mysql -u root -ptemp_root_password -e "SELECT 1;" 2>/dev/null || {
-        print_error "Could not establish MySQL root access"
-        exit 1
-    }
-    
-    # Set the actual root password
-    mysql -u root -ptemp_root_password -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'secure_root_password_$(date +%s)';"
-    mysql -u root -ptemp_root_password -e "FLUSH PRIVILEGES;"
+    case "$auth_method" in
+        "no_password")
+            mysql -u "$user" -e "SELECT 1;" 2>/dev/null
+            ;;
+        "sudo")
+            sudo mysql -u "$user" -e "SELECT 1;" 2>/dev/null
+            ;;
+        "password")
+            mysql -u "$user" -p"$password" -e "SELECT 1;" 2>/dev/null
+            ;;
+    esac
 }
-EOF
 
-# Create database and user with proper authentication
-print_status "Creating database and application user..."
+# Setup MySQL database
+print_status "Setting up MySQL database..."
 
-# Try different methods to access MySQL
-if mysql -u root -e "SELECT 1;" 2>/dev/null; then
-    # Root access without password (auth_socket)
-    mysql -u root <<EOF
-CREATE DATABASE IF NOT EXISTS $DB_NAME;
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-elif sudo mysql -e "SELECT 1;" 2>/dev/null; then
-    # Root access via sudo
-    sudo mysql <<EOF
-CREATE DATABASE IF NOT EXISTS $DB_NAME;
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
-FLUSH PRIVILEGES;
-EOF
+# Try different authentication methods
+MYSQL_AUTH_METHOD=""
+if test_mysql_connection "root" "" "no_password"; then
+    MYSQL_AUTH_METHOD="no_password"
+    print_status "Using MySQL root without password"
+elif test_mysql_connection "root" "" "sudo"; then
+    MYSQL_AUTH_METHOD="sudo"
+    print_status "Using MySQL root with sudo"
 else
-    print_error "Could not access MySQL to create database"
+    print_error "Cannot connect to MySQL. Please check MySQL installation."
     exit 1
 fi
+
+# Create database and user
+print_status "Creating database and user..."
+
+case "$MYSQL_AUTH_METHOD" in
+    "no_password")
+        mysql -u root <<EOF
+CREATE DATABASE IF NOT EXISTS $DB_NAME;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+        ;;
+    "sudo")
+        sudo mysql <<EOF
+CREATE DATABASE IF NOT EXISTS $DB_NAME;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+        ;;
+esac
 
 print_status "Database setup completed"
 
@@ -125,10 +128,6 @@ npm install -g pm2
 print_status "Creating application user..."
 if ! id "$APP_USER" &>/dev/null; then
     useradd -r -s /bin/false -d $APP_DIR $APP_USER
-    # Create runtime directory for app user
-    mkdir -p /tmp/runtime-$APP_USER
-    chown $APP_USER:$APP_USER /tmp/runtime-$APP_USER
-    chmod 700 /tmp/runtime-$APP_USER
 fi
 
 # Create application directory
@@ -142,7 +141,7 @@ print_status "Copying application files..."
 rsync -av --exclude=node_modules --exclude=.git --exclude=dist . $APP_DIR/
 chown -R $APP_USER:$APP_USER $APP_DIR
 
-# Create environment file with database credentials
+# Create environment file
 print_status "Creating environment configuration..."
 cat > $APP_DIR/.env << EOF
 NODE_ENV=production
@@ -152,7 +151,7 @@ DB_PORT=3306
 DB_USER=$DB_USER
 DB_PASSWORD=$DB_PASSWORD
 DB_NAME=$DB_NAME
-JWT_SECRET=$(openssl rand -base64 64 | tr -d '\n')
+JWT_SECRET=$JWT_SECRET
 FRONTEND_URL=https://your-domain.com
 EOF
 
@@ -163,69 +162,38 @@ chmod 600 $APP_DIR/.env
 print_status "Installing Node.js dependencies..."
 cd $APP_DIR
 
-# Set environment variables for the app user build process
+# Install dependencies as app user
 sudo -u $APP_USER bash -c "
 export NODE_ENV=production
-export DISPLAY=
-export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
-export QT_QPA_PLATFORM=offscreen
 npm install --production --no-optional
 "
 
-# Build frontend with virtual display
+# Build frontend
 print_status "Building frontend..."
 sudo -u $APP_USER bash -c "
 export NODE_ENV=production
-export DISPLAY=:99
-export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
-export QT_QPA_PLATFORM=offscreen
-# Start virtual display
-Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
-XVFB_PID=\$!
-# Wait a moment for Xvfb to start
-sleep 2
-# Run the build
 npm run build
-# Kill virtual display
-kill \$XVFB_PID 2>/dev/null || true
 "
 
 # Verify dist folder was created
 if [ ! -d "$APP_DIR/dist" ]; then
     print_error "Frontend build failed - dist folder not created"
-    print_error "Trying alternative build method..."
-    
-    # Alternative build without virtual display
-    sudo -u $APP_USER bash -c "
-    export NODE_ENV=production
-    export DISPLAY=
-    export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
-    export QT_QPA_PLATFORM=minimal
-    npm run build 2>&1 | grep -v 'qt.qpa' || true
-    "
-    
-    if [ ! -d "$APP_DIR/dist" ]; then
-        print_error "Frontend build failed completely"
-        exit 1
-    fi
+    exit 1
 fi
 
 print_status "Frontend built successfully"
 
-# Run database migrations with proper credentials
+# Run database migrations
 print_status "Running database migrations..."
 sudo -u $APP_USER bash -c "
 cd $APP_DIR
-export XDG_RUNTIME_DIR=/tmp/runtime-$APP_USER
-export DB_HOST=localhost
-export DB_USER=$DB_USER
-export DB_PASSWORD=$DB_PASSWORD
-export DB_NAME=$DB_NAME
+export NODE_ENV=production
+source .env
 npm run db:migrate || echo 'Database migration failed - continuing anyway'
 npm run db:seed || echo 'Database seeding failed - continuing anyway'
 "
 
-# Update systemd service with environment variables
+# Create systemd service
 print_status "Setting up systemd service..."
 cat > /etc/systemd/system/email-platform.service << EOF
 [Unit]
@@ -309,31 +277,30 @@ if command -v ufw >/dev/null 2>&1; then
     ufw allow 22
     ufw allow 80
     ufw allow 443
-    ufw allow 3306
 else
     print_warning "UFW not available, skipping firewall configuration"
 fi
 
-# Create backup script with proper credentials
+# Create backup script
 print_status "Setting up backup script..."
-cat > /usr/local/bin/backup-email-platform.sh << EOF
+cat > /usr/local/bin/backup-email-platform.sh << 'EOF'
 #!/bin/bash
 BACKUP_DIR="/opt/backups"
-DATE=\$(date +%Y%m%d_%H%M%S)
-mkdir -p \$BACKUP_DIR
+DATE=$(date +%Y%m%d_%H%M%S)
+mkdir -p $BACKUP_DIR
 
 # Load database credentials
-source $APP_DIR/.env
+source /opt/email-platform/.env
 
 # Backup database
-mysqldump -u \$DB_USER -p\$DB_PASSWORD \$DB_NAME > \$BACKUP_DIR/db_backup_\$DATE.sql 2>/dev/null || echo "Database backup failed"
+mysqldump -u $DB_USER -p$DB_PASSWORD $DB_NAME > $BACKUP_DIR/db_backup_$DATE.sql 2>/dev/null || echo "Database backup failed"
 
 # Backup application files
-tar -czf \$BACKUP_DIR/app_backup_\$DATE.tar.gz -C /opt email-platform 2>/dev/null || echo "Application backup failed"
+tar -czf $BACKUP_DIR/app_backup_$DATE.tar.gz -C /opt email-platform 2>/dev/null || echo "Application backup failed"
 
 # Keep only last 7 days of backups
-find \$BACKUP_DIR -name "*.sql" -mtime +7 -delete 2>/dev/null || true
-find \$BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete 2>/dev/null || true
+find $BACKUP_DIR -name "*.sql" -mtime +7 -delete 2>/dev/null || true
+find $BACKUP_DIR -name "*.tar.gz" -mtime +7 -delete 2>/dev/null || true
 EOF
 
 chmod +x /usr/local/bin/backup-email-platform.sh
@@ -341,9 +308,6 @@ chmod +x /usr/local/bin/backup-email-platform.sh
 # Setup daily backup cron job
 print_status "Setting up daily backups..."
 (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/backup-email-platform.sh") | crontab -
-
-# Clean up temporary runtime directories
-rm -rf /tmp/runtime-root /tmp/runtime-$APP_USER
 
 # Final status check
 print_status "Checking service status..."
