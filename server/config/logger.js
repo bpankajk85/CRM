@@ -1,17 +1,10 @@
 import winston from 'winston';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { existsSync, mkdirSync } from 'fs';
 
 // Ensure logs directory exists
-import { mkdirSync } from 'fs';
-const logsDir = path.join(__dirname, '..', '..', 'logs');
-try {
+const logsDir = 'logs';
+if (!existsSync(logsDir)) {
   mkdirSync(logsDir, { recursive: true });
-} catch (error) {
-  // Directory might already exist
 }
 
 export const logger = winston.createLogger({
@@ -24,15 +17,15 @@ export const logger = winston.createLogger({
   defaultMeta: { service: 'email-platform' },
   transports: [
     new winston.transports.File({ 
-      filename: path.join(logsDir, 'error.log'), 
+      filename: 'logs/error.log', 
       level: 'error',
-      maxsize: 5242880, // 5MB
-      maxFiles: 5
+      handleExceptions: true,
+      handleRejections: true
     }),
     new winston.transports.File({ 
-      filename: path.join(logsDir, 'combined.log'),
-      maxsize: 5242880, // 5MB
-      maxFiles: 5
+      filename: 'logs/combined.log',
+      handleExceptions: true,
+      handleRejections: true
     }),
   ],
 });
@@ -42,19 +35,17 @@ if (process.env.NODE_ENV !== 'production') {
     format: winston.format.combine(
       winston.format.colorize(),
       winston.format.simple()
-    )
+    ),
+    handleExceptions: true,
+    handleRejections: true
   }));
 }
 
-// Handle uncaught exceptions and unhandled rejections
+// Handle uncaught exceptions and rejections
 logger.exceptions.handle(
-  new winston.transports.File({ 
-    filename: path.join(logsDir, 'exceptions.log'),
-    maxsize: 5242880,
-    maxFiles: 5
-  })
+  new winston.transports.File({ filename: 'logs/exceptions.log' })
 );
 
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', { promise, reason });
-});
+logger.rejections.handle(
+  new winston.transports.File({ filename: 'logs/rejections.log' })
+);
