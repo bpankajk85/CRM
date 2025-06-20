@@ -3,7 +3,7 @@ import { logger } from './logger.js';
 
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 3306,
+  port: parseInt(process.env.DB_PORT) || 3306,
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'email_platform',
@@ -12,7 +12,9 @@ const dbConfig = {
   queueLimit: 0,
   acquireTimeout: 60000,
   timeout: 60000,
-  reconnect: true
+  reconnect: true,
+  charset: 'utf8mb4',
+  timezone: '+00:00'
 };
 
 export const pool = mysql.createPool(dbConfig);
@@ -35,7 +37,20 @@ export async function query(sql, params = []) {
     const [results] = await pool.execute(sql, params);
     return results;
   } catch (error) {
-    logger.error('Database query error:', error);
+    logger.error('Database query error:', { sql, params, error: error.message });
     throw error;
   }
 }
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  logger.info('Closing database connection pool...');
+  await pool.end();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  logger.info('Closing database connection pool...');
+  await pool.end();
+  process.exit(0);
+});

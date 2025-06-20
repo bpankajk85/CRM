@@ -14,6 +14,7 @@ APP_DIR="/opt/email-platform"
 DB_NAME="email_platform"
 DB_USER="email_platform"
 DB_PASSWORD="$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-25)"
+DB_ROOT_PASSWORD="$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-25)"
 JWT_SECRET="$(openssl rand -base64 64 | tr -d '\n')"
 
 # Colors for output
@@ -54,7 +55,12 @@ apt update && apt upgrade -y
 
 # Install required packages
 print_status "Installing required packages..."
-apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl
+apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl expect
+
+# Configure MySQL root password before starting service
+print_status "Configuring MySQL root password..."
+debconf-set-selections <<< "mysql-server mysql-server/root_password password $DB_ROOT_PASSWORD"
+debconf-set-selections <<< "mysql-server mysql-server/root_password_again password $DB_ROOT_PASSWORD"
 
 # Start and enable MySQL service
 print_status "Starting MySQL service..."
@@ -63,64 +69,86 @@ systemctl enable mysql
 
 # Wait for MySQL to be ready
 print_status "Waiting for MySQL to be ready..."
-sleep 10
+sleep 15
 
-# Function to test MySQL connection
+# Function to test MySQL connection with password
 test_mysql_connection() {
     local user="$1"
     local password="$2"
-    local auth_method="$3"
     
-    case "$auth_method" in
-        "no_password")
-            mysql -u "$user" -e "SELECT 1;" 2>/dev/null
-            ;;
-        "sudo")
-            sudo mysql -u "$user" -e "SELECT 1;" 2>/dev/null
-            ;;
-        "password")
-            mysql -u "$user" -p"$password" -e "SELECT 1;" 2>/dev/null
-            ;;
-    esac
+    mysql -u "$user" -p"$password" -e "SELECT 1;" 2>/dev/null
 }
 
-# Setup MySQL database
+# Setup MySQL database with proper authentication
 print_status "Setting up MySQL database..."
 
-# Try different authentication methods
-MYSQL_AUTH_METHOD=""
-if test_mysql_connection "root" "" "no_password"; then
-    MYSQL_AUTH_METHOD="no_password"
-    print_status "Using MySQL root without password"
-elif test_mysql_connection "root" "" "sudo"; then
-    MYSQL_AUTH_METHOD="sudo"
-    print_status "Using MySQL root with sudo"
+# First, try to secure the MySQL installation and set root password
+print_status "Securing MySQL installation..."
+
+# Use expect to automate mysql_secure_installation
+expect -c "
+spawn mysql_secure_installation
+expect \"Enter current password for root (enter for none):\"
+send \"\r\"
+expect \"Set root password?\"
+send \"y\r\"
+expect \"New password:\"
+send \"$DB_ROOT_PASSWORD\r\"
+expect \"Re-enter new password:\"
+send \"$DB_ROOT_PASSWORD\r\"
+expect \"Remove anonymous users?\"
+send \"y\r\"
+expect \"Disallow root login remotely?\"
+send \"n\r\"
+expect \"Remove test database and access to it?\"
+send \"y\r\"
+expect \"Reload privilege tables now?\"
+send \"y\r\"
+expect eof
+" || print_warning "mysql_secure_installation may have failed, continuing..."
+
+# Wait a bit more for MySQL to stabilize
+sleep 5
+
+# Test connection with root password
+if test_mysql_connection "root" "$DB_ROOT_PASSWORD"; then
+    print_status "MySQL root connection successful"
+    MYSQL_ROOT_AUTH="password"
 else
-    print_error "Cannot connect to MySQL. Please check MySQL installation."
-    exit 1
+    print_error "Cannot connect to MySQL with root password. Trying alternative methods..."
+    
+    # Try without password first
+    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+        print_status "MySQL root connection without password successful"
+        MYSQL_ROOT_AUTH="no_password"
+        
+        # Set root password
+        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASSWORD';"
+        mysql -u root -e "FLUSH PRIVILEGES;"
+        MYSQL_ROOT_AUTH="password"
+    else
+        print_error "Cannot establish MySQL connection. Please check MySQL installation."
+        exit 1
+    fi
 fi
 
 # Create database and user
 print_status "Creating database and user..."
 
-case "$MYSQL_AUTH_METHOD" in
-    "no_password")
-        mysql -u root <<EOF
-CREATE DATABASE IF NOT EXISTS $DB_NAME;
+mysql -u root -p"$DB_ROOT_PASSWORD" <<EOF
+CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
 FLUSH PRIVILEGES;
 EOF
-        ;;
-    "sudo")
-        sudo mysql <<EOF
-CREATE DATABASE IF NOT EXISTS $DB_NAME;
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-        ;;
-esac
+
+# Test the new user connection
+if test_mysql_connection "$DB_USER" "$DB_PASSWORD"; then
+    print_status "Database user connection successful"
+else
+    print_error "Failed to create database user"
+    exit 1
+fi
 
 print_status "Database setup completed"
 
@@ -374,9 +402,11 @@ echo "🔧 Database Info:"
 echo "   - Database Name: $DB_NAME"
 echo "   - Database User: $DB_USER"
 echo "   - Database Password: $DB_PASSWORD"
+echo "   - MySQL Root Password: $DB_ROOT_PASSWORD"
 echo "   - Test Connection: mysql -u $DB_USER -p$DB_PASSWORD $DB_NAME"
 echo ""
 echo "🔧 Troubleshooting:"
 echo "   - View application logs: journalctl -u email-platform -f"
 echo "   - View nginx logs: tail -f /var/log/nginx/email-platform.*.log"
 echo "   - Check environment: cat $APP_DIR/.env"
+echo "   - MySQL root login: mysql -u root -p$DB_ROOT_PASSWORD"

@@ -11,9 +11,18 @@ router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    // Validate input
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    logger.info(`Login attempt for email: ${email}`);
 
     const users = await query(`
       SELECT u.*, o.name as organization_name 
@@ -23,13 +32,17 @@ router.post('/login', async (req, res) => {
     `, [email]);
 
     if (users.length === 0) {
+      logger.warn(`Login failed - user not found: ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const user = users[0];
+    
+    // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password_hash);
 
     if (!isValidPassword) {
+      logger.warn(`Login failed - invalid password for: ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -42,24 +55,29 @@ router.post('/login', async (req, res) => {
     await query(`
       INSERT INTO audit_logs (organization_id, user_id, action, ip_address, user_agent)
       VALUES (?, ?, 'user_login', ?, ?)
-    `, [user.organization_id, user.id, req.ip, req.get('User-Agent')]);
+    `, [user.organization_id, user.id, req.ip || 'unknown', req.get('User-Agent') || 'unknown']);
+
+    logger.info(`Login successful for: ${email}`);
+
+    // Return user data
+    const userData = {
+      id: user.id,
+      email: user.email,
+      firstName: user.first_name,
+      lastName: user.last_name,
+      role: user.role,
+      organizationId: user.organization_id,
+      organizationName: user.organization_name
+    };
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.first_name,
-        lastName: user.last_name,
-        role: user.role,
-        organizationId: user.organization_id,
-        organizationName: user.organization_name
-      }
+      user: userData
     });
 
   } catch (error) {
     logger.error('Login error:', error);
-    res.status(500).json({ error: 'Login failed' });
+    res.status(500).json({ error: 'Login failed. Please try again.' });
   }
 });
 
@@ -104,10 +122,19 @@ router.post('/change-password', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Current and new passwords are required' });
     }
 
-    const users = await query('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
-    const user = users[0];
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters long' });
+    }
 
+    const users = await query('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
+    
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const user = users[0];
     const isValidPassword = await bcrypt.compare(currentPassword, user.password_hash);
+    
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
@@ -119,7 +146,9 @@ router.post('/change-password', authenticateToken, async (req, res) => {
     await query(`
       INSERT INTO audit_logs (organization_id, user_id, action, ip_address, user_agent)
       VALUES (?, ?, 'password_changed', ?, ?)
-    `, [req.user.organizationId, req.user.id, req.ip, req.get('User-Agent')]);
+    `, [req.user.organizationId, req.user.id, req.ip || 'unknown', req.get('User-Agent') || 'unknown']);
+
+    logger.info(`Password changed for user: ${req.user.id}`);
 
     res.json({ message: 'Password changed successfully' });
 
