@@ -19,14 +19,26 @@ export default function LoginPage() {
       await login(email, password);
     } catch (err) {
       console.error('Login error:', err);
-      
-      // Handle different types of errors
       if (err instanceof Error) {
+        const data = await response.json();
         setError(err.message);
       } else if (typeof err === 'string') {
         setError(err);
       } else {
-        setError('Login failed. Please check your credentials and try again.');
+        let errorMessage = 'Login failed. Please check your credentials and try again.';
+        
+        try {
+          const data = await response.json();
+          errorMessage = data.message || errorMessage;
+        } catch (jsonError) {
+          // If response is not valid JSON, use default error message
+          console.error('Failed to parse error response:', jsonError);
+          if (response.status >= 500) {
+            errorMessage = 'Server error. Please try again later.';
+          }
+        }
+        
+        throw new Error(errorMessage);
       }
     } finally {
       setLoading(false);

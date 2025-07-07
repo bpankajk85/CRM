@@ -55,21 +55,34 @@ apt update && apt upgrade -y
 
 # Install required packages
 print_status "Installing required packages..."
-apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl expect
-
-# Configure MySQL root password before starting service
-print_status "Configuring MySQL root password..."
-debconf-set-selections <<< "mysql-server mysql-server/root_password password $DB_ROOT_PASSWORD"
-debconf-set-selections <<< "mysql-server mysql-server/root_password_again password $DB_ROOT_PASSWORD"
+apt install -y nodejs npm mysql-server nginx certbot python3-certbot-nginx curl
 
 # Start and enable MySQL service
 print_status "Starting MySQL service..."
 systemctl start mysql
 systemctl enable mysql
 
-# Wait for MySQL to be ready
+# Wait for MySQL to be fully ready with proper health check
 print_status "Waiting for MySQL to be ready..."
-sleep 15
+MYSQL_READY=false
+RETRY_COUNT=0
+MAX_RETRIES=30
+
+while [ "$MYSQL_READY" = false ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if mysqladmin ping --silent 2>/dev/null; then
+        MYSQL_READY=true
+        print_status "MySQL is ready"
+    else
+        print_status "Waiting for MySQL... (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
+        sleep 2
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+    fi
+done
+
+if [ "$MYSQL_READY" = false ]; then
+    print_error "MySQL failed to start properly after $MAX_RETRIES attempts"
+    exit 1
+fi
 
 # Function to test MySQL connection with password
 test_mysql_connection() {
@@ -82,54 +95,25 @@ test_mysql_connection() {
 # Setup MySQL database with proper authentication
 print_status "Setting up MySQL database..."
 
-# First, try to secure the MySQL installation and set root password
-print_status "Securing MySQL installation..."
-
-# Use expect to automate mysql_secure_installation
-expect -c "
-spawn mysql_secure_installation
-expect \"Enter current password for root (enter for none):\"
-send \"\r\"
-expect \"Set root password?\"
-send \"y\r\"
-expect \"New password:\"
-send \"$DB_ROOT_PASSWORD\r\"
-expect \"Re-enter new password:\"
-send \"$DB_ROOT_PASSWORD\r\"
-expect \"Remove anonymous users?\"
-send \"y\r\"
-expect \"Disallow root login remotely?\"
-send \"n\r\"
-expect \"Remove test database and access to it?\"
-send \"y\r\"
-expect \"Reload privilege tables now?\"
-send \"y\r\"
-expect eof
-" || print_warning "mysql_secure_installation may have failed, continuing..."
-
-# Wait a bit more for MySQL to stabilize
-sleep 5
-
-# Test connection with root password
-if test_mysql_connection "root" "$DB_ROOT_PASSWORD"; then
-    print_status "MySQL root connection successful"
+# Try to connect without password first (default MySQL 8.0+ behavior)
+if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+    print_status "MySQL root connection without password successful"
+    
+    # Set root password and secure the installation
+    mysql -u root <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASSWORD';
+DELETE FROM mysql.user WHERE User='';
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+DROP DATABASE IF EXISTS test;
+DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+FLUSH PRIVILEGES;
+EOF
+    
+    print_status "MySQL root password set and installation secured"
     MYSQL_ROOT_AUTH="password"
 else
-    print_error "Cannot connect to MySQL with root password. Trying alternative methods..."
-    
-    # Try without password first
-    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
-        print_status "MySQL root connection without password successful"
-        MYSQL_ROOT_AUTH="no_password"
-        
-        # Set root password
-        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_ROOT_PASSWORD';"
-        mysql -u root -e "FLUSH PRIVILEGES;"
-        MYSQL_ROOT_AUTH="password"
-    else
-        print_error "Cannot establish MySQL connection. Please check MySQL installation."
-        exit 1
-    fi
+    print_error "Cannot establish initial MySQL connection"
+    exit 1
 fi
 
 # Create database and user

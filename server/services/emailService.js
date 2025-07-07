@@ -4,7 +4,7 @@ import { query } from '../config/database.js';
 import { incrementEmailCount, checkEmailRateLimit } from '../middleware/emailRateLimit.js';
 
 // Email service configuration
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   // Configure with your SMTP settings
   host: process.env.SMTP_HOST || 'localhost',
   port: process.env.SMTP_PORT || 587,
