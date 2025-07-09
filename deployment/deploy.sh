@@ -197,7 +197,12 @@ export XDG_RUNTIME_DIR=''
 export QT_QPA_PLATFORM=offscreen
 export QT_LOGGING_RULES='*=false'
 export CI=true
-npm run build 2>&1 | grep -v 'qt.qpa' || true
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+export PUPPETEER_SKIP_DOWNLOAD=true
+export DISABLE_OPENCOLLECTIVE=true
+export ADBLOCK=true
+npm ci --production --no-optional --ignore-scripts 2>/dev/null || npm install --production --no-optional --ignore-scripts
+npm run build --verbose 2>&1 | grep -v -E '(qt\.qpa|Opening the file|\.cpp)' || true
 "
 
 # Verify dist folder was created
@@ -214,11 +219,25 @@ if [ ! -d "$APP_DIR/dist" ]; then
     export QT_LOGGING_RULES='*=false'
     export CI=true
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-    npm run build --silent 2>/dev/null || npm run build
+    export PUPPETEER_SKIP_DOWNLOAD=true
+    export DISABLE_OPENCOLLECTIVE=true
+    export ADBLOCK=true
+    export VITE_CJS_IGNORE_WARNING=true
+    # Clear any cached build artifacts
+    rm -rf node_modules/.vite
+    rm -rf dist
+    # Try with minimal dependencies
+    npm run build --no-optional 2>&1 | head -100 || {
+        print_error 'Build failed, trying with legacy peer deps'
+        npm run build --legacy-peer-deps 2>&1 | head -100
+    }
     "
     
     if [ ! -d "$APP_DIR/dist" ]; then
         print_error "Frontend build failed completely"
+        print_error "Checking for build logs..."
+        ls -la $APP_DIR/ || true
+        ls -la $APP_DIR/node_modules/.vite/ 2>/dev/null || true
         exit 1
     fi
 fi
