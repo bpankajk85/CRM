@@ -297,6 +297,7 @@ timeout 300 node simple-build.js 2>&1 | grep -v -E '(qt\.qpa|Opening the file|\.
 </body>
 </html>
 HTMLEOF
+HTMLEOF
     
     if [ ! -f "dist/index.html" ]; then
         print_error 'Failed to create fallback build'
@@ -358,7 +359,6 @@ if [ ! -d "$APP_DIR/dist" ]; then
         exit 1
     fi
     "
-fi
 
 print_status "Frontend built successfully"
 
