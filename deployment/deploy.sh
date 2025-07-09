@@ -202,7 +202,17 @@ export PUPPETEER_SKIP_DOWNLOAD=true
 export DISABLE_OPENCOLLECTIVE=true
 export ADBLOCK=true
 npm ci --production --no-optional --ignore-scripts 2>/dev/null || npm install --production --no-optional --ignore-scripts
-npm run build --verbose 2>&1 | grep -v -E '(qt\.qpa|Opening the file|\.cpp)' || true
+# Set build timeout and run with timeout command
+timeout 300 npm run build 2>&1 | grep -v -E '(qt\.qpa|Opening the file|\.cpp)' || {
+    print_error 'Build timed out or failed, trying alternative method'
+    # Clear any partial build
+    rm -rf dist
+    # Try with different approach
+    timeout 300 npx vite build --mode production --logLevel error || {
+        print_error 'Alternative build also failed'
+        exit 1
+    }
+}
 "
 
 # Verify dist folder was created
@@ -226,10 +236,13 @@ if [ ! -d "$APP_DIR/dist" ]; then
     # Clear any cached build artifacts
     rm -rf node_modules/.vite
     rm -rf dist
-    # Try with minimal dependencies
-    npm run build --no-optional 2>&1 | head -100 || {
+    # Try with timeout and minimal output
+    timeout 300 npm run build --no-optional 2>&1 | head -100 || {
         print_error 'Build failed, trying with legacy peer deps'
-        npm run build --legacy-peer-deps 2>&1 | head -100
+        timeout 300 npm run build --legacy-peer-deps 2>&1 | head -100 || {
+            print_error 'All build attempts failed'
+            exit 1
+        }
     }
     "
     

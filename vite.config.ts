@@ -9,38 +9,37 @@ export default defineConfig({
     include: ['react', 'react-dom']
   },
   build: {
-    // Disable any GUI-related features during build
     target: 'es2015',
     minify: 'esbuild',
     sourcemap: false,
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
-      external: [],
       output: {
         manualChunks: {
           vendor: ['react', 'react-dom'],
           router: ['react-router-dom'],
           charts: ['recharts']
         }
-      }
-    },
-    // Reduce memory usage during build
-    rollupOptions: {
-      ...this.rollupOptions,
+      },
       onwarn(warning, warn) {
-        // Suppress certain warnings that might cause issues
+        // Suppress warnings that might cause build to hang
         if (warning.code === 'MODULE_LEVEL_DIRECTIVE') return;
         if (warning.code === 'SOURCEMAP_ERROR') return;
+        if (warning.code === 'CIRCULAR_DEPENDENCY') return;
+        if (warning.message.includes('Use of eval')) return;
         warn(warning);
       }
-    }
+    },
+    // Prevent build from hanging
+    emptyOutDir: true,
+    reportCompressedSize: false,
+    // Reduce memory usage
+    terserOptions: undefined
   },
-  // Disable any development server features that might require GUI
   server: {
     strictPort: false,
     hmr: false
   },
-  // Ensure no GUI dependencies are loaded
   define: {
     'process.env.DISPLAY': '""',
     'process.env.XDG_RUNTIME_DIR': '""',
@@ -48,6 +47,17 @@ export default defineConfig({
     'process.env.NODE_ENV': '"production"'
   },
   esbuild: {
-    logOverride: { 'this-is-undefined-in-esm': 'silent' }
-  }
+    logOverride: { 
+      'this-is-undefined-in-esm': 'silent',
+      'commonjs-proxy': 'silent'
+    },
+    // Prevent esbuild from hanging
+    keepNames: false,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    minifyWhitespace: true
+  },
+  // Add timeout and memory limits
+  logLevel: 'error',
+  clearScreen: false
 });
