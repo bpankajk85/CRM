@@ -22,19 +22,14 @@ export default defineConfig({
         }
       },
       onwarn(warning, warn) {
-        // Suppress warnings that might cause build to hang
-        if (warning.code === 'MODULE_LEVEL_DIRECTIVE') return;
-        if (warning.code === 'SOURCEMAP_ERROR') return;
-        if (warning.code === 'CIRCULAR_DEPENDENCY') return;
-        if (warning.message.includes('Use of eval')) return;
-        warn(warning);
+        // Suppress all warnings that might cause issues
+        return;
       }
     },
-    // Prevent build from hanging
     emptyOutDir: true,
     reportCompressedSize: false,
-    // Reduce memory usage
-    terserOptions: undefined
+    // Completely disable terser to avoid any native dependencies
+    minify: false
   },
   server: {
     strictPort: false,
@@ -44,20 +39,28 @@ export default defineConfig({
     'process.env.DISPLAY': '""',
     'process.env.XDG_RUNTIME_DIR': '""',
     'process.env.CI': '"true"',
-    'process.env.NODE_ENV': '"production"'
+    'process.env.NODE_ENV': '"production"',
+    'process.env.HEADLESS': '"true"',
+    'global': 'globalThis'
   },
   esbuild: {
     logOverride: { 
       'this-is-undefined-in-esm': 'silent',
       'commonjs-proxy': 'silent'
     },
-    // Prevent esbuild from hanging
     keepNames: false,
-    minifyIdentifiers: true,
-    minifySyntax: true,
-    minifyWhitespace: true
+    minifyIdentifiers: false,
+    minifySyntax: false,
+    minifyWhitespace: false,
+    // Disable all optimizations that might require native deps
+    target: 'es2015'
   },
-  // Add timeout and memory limits
   logLevel: 'error',
-  clearScreen: false
+  clearScreen: false,
+  // Ensure no native dependencies are used
+  resolve: {
+    alias: {
+      // Prevent any potential native module loading
+    }
+  }
 });

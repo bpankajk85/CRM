@@ -7,7 +7,7 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:client": "vite",
     "dev:server": "nodemon server/index.js",
-    "build": "NODE_ENV=production vite build --mode production --logLevel error",
+    "build": "NODE_ENV=production DISPLAY= QT_QPA_PLATFORM=offscreen vite build --mode production --logLevel error",
     "build:server": "node server/build.js",
     "start": "node server/index.js",
     "lint": "eslint .",
